@@ -1,2 +1,2 @@
 # IWD-Hackathon
-Prediction severity of Insurance Claims
+Predicting severity of Insurance Claims
