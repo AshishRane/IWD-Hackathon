@@ -1,0 +1,213 @@
+---
+title: "Predicting severity of Allstate Insurance Claims"
+author: "Ashish Rane, Louis Richer, Ashish Rane"
+date: "10/27/2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Problem Introduction (Kaggle's competition description)
+
+How severe is an insurance claim?
+
+When you've been devastated by a serious car accident, your focus is on the things that matter the most: family, friends, and other loved ones. Pushing paper with your insurance agent is the last place you want your time or mental energy spent. This is why Allstate, a personal insurer in the United States, is continually seeking fresh ideas to improve their claims service for the over 16 million households they protect.
+
+Allstate is currently developing automated methods of predicting the cost, and hence severity, of claims. In this recruitment challenge, Kagglers are invited to show off their creativity and flex their technical chops by creating an algorithm which accurately predicts claims severity. Aspiring competitors will demonstrate insight into better ways to predict claims severity for the chance to be part of Allstate???s efforts to ensure a worry-free customer experience.
+
+### Introduction to the Data
+
+Each row in this dataset represents an insurance claim. You must predict the value for the 'loss' column. Variables prefaced with 'cat' are categorical, while those prefaced with 'cont' are continuous.
+
+File descriptions:
+
+* train.csv - the training set
+* test.csv - the test set. You must predict the loss value for the ids in this file.
+* sample_submission.csv - a sample submission file in the correct format
+
+
+```{r,eval=FALSE,echo=TRUE}
+# Load Required packages
+library(xgboost)
+library(randomForest)
+library(data.table)
+library(Matrix)
+library(FeatureHashing)
+library(dplyr)
+library(readr)
+library(Metrics)
+library(caret)
+library(ggplot2)
+library(data.table)
+library(corrplot)
+```
+
+### Set the current working directory
+```{r,echo=TRUE,eval=FALSE}
+setwd("/Users/ashish/Documents/Kaggle/AllStateInsuranceClaimSeverity")
+```
+
+### Load the datasets
+```{r,echo=TRUE,eval=FALSE}
+train_orig <- fread('train.csv')
+test_orig <- fread('test.csv')
+```
+
+###Feature engineering
+New feature - 'losscat' feature has been added to categorize the losses based on their values
+
+###Exploratory Data Analysis
+
+#### Check the structure of the datasets
+
+```{r,echo=TRUE,eval=FALSE}
+str(train_orig)
+str(test_orig)
+```
+
+#### Check corelation between continuous variables
+
+```{r,echo=TRUE,eval=FALSE}
+co_var <- paste0("cont", seq(1, 14))
+summary(train_orig[,co_var]) #No missing values
+train_orig_df <- as.data.frame(train_orig)
+corelation <- cor(train_orig_df[,co_var])
+head(round(corelation, 2))                  
+```
+
+#### Plot corelation graph
+
+corrplot(corelation, type="upper", order="hclust",col=brewer.pal(n=8, name="PuOr"),addCoef.col="grey",diag=FALSE)
+
+
+#### Load the IDs from the test dataset to a variable for later use
+```{r,echo=TRUE,eval=FALSE}
+testID <- test_orig$id
+```
+
+#### Setting levels
+```{r,echo=TRUE,eval=FALSE}
+cvar <- names(train_orig)[sapply(train_orig, is.character)]
+cat(cvar)
+for(var in cvar) {
+  foo.levels <- unique(c(train_orig[[var]], test_orig[[var]]))
+  set(train_orig, j = var, value = factor(train_orig[[var]], levels = foo.levels))
+  set(test_orig, j = var, value = factor(test_orig[[var]], levels = foo.levels))
+}
+```
+
+#### Save Dependent variable from train dataset to a new variable for later use
+```{r,echo=TRUE,eval=FALSE}
+response <- train_orig$loss
+```
+
+#### Set Id & loss variables from train dataset to NULL 
+```{r,echo=TRUE, eval=FALSE}
+train_orig[, id := NULL]
+train_orig[, loss := NULL]
+```
+
+#### Set Id variable from test dataset to NULL
+```{r,echo=TRUE, eval=FALSE}
+test_orig[, id := NULL]
+```
+####Merge the train and test datasets
+```{r,echo=TRUE, eval=FALSE}
+merge <- rbind(train_orig, test_orig)
+merge$i <- 1:dim(merge)[1]
+```
+
+
+####Check for factor variables
+```{r,echo=TRUE,eval=FALSE}
+fac_var <- names(train_orig)[sapply(train_orig, is.factor)]
+
+merge[, (fac_var) := lapply(.SD, as.numeric), .SDcols = fac_var]
+```
+
+
+#### Creating a sparse matrix 
+```{r,echo=TRUE,eval=FALSE}
+merge.sparse <- sparseMatrix(merge$i, merge[,cvar[1], with = FALSE][[1]])
+
+for(var in cvar[-1]){
+  merge.sparse <- cbind(merge.sparse, sparseMatrix(merge$i, merge[,var, with = FALSE][[1]])) 
+  cat('Combining: ', var, '\n')
+}
+
+```
+
+
+####Separating the test and train dataset
+
+```{r,echo=TRUE,eval=FALSE}
+merge.sparse <- cbind(merge.sparse, as.matrix(merge[,-c(cvar, 'i'), with = FALSE]))
+dim(merge.sparse)
+train <- merge.sparse[1:(dim(train_orig)[1]),]
+test <- merge.sparse[(dim(train_orig)[1] + 1):nrow(merge),]
+
+
+xg_eval_mae <- function (yhat, dtrain) {
+  y = getinfo(dtrain, "label")
+  err= mae(exp(y),exp(yhat) )
+  return (list(metric = "error", value = err))
+}
+
+xgb_params = list(
+  seed = 0,
+  colsample_bytree = 0.7,
+  subsample = 0.7,
+  eta = 0.075,
+  objective = 'reg:linear',
+  max_depth = 6,
+  num_parallel_tree = 1,
+  min_child_weight = 1,
+  base_score = 7
+)
+```
+
+
+####Get a random sample subset of data for validation
+```{r,echo=TRUE,eval=FALSE}
+sample.index <- sample(1:nrow(train_orig), nrow(train_orig) * 0.9)
+```
+
+#### Cross Validation for nrounds 
+```{r,echo=TRUE,eval=FALSE}
+validation <- xgb.DMatrix(train[-sample.index,], label = log(response[-sample.index]))
+train <- xgb.DMatrix(train[sample.index,], label = log(response[sample.index]))
+test <- xgb.DMatrix(test)
+```
+
+#### Training Predictive model
+```{r,echo=TRUE,eval=FALSE}
+xgboost_model <- xgb.train(xgb_params,
+                      train,
+                      nrounds=750,
+                      print_every_n = 5,
+                      verbose= 1,
+                      watchlist = list(valid_score = validation),
+                      feval=xg_eval_mae,
+                      early_stop_rounds = 20,
+                      maximize=FALSE)
+```
+
+#### Model prediction on test dataset
+```{r,echo=TRUE,eval=FALSE}
+xgboost_prediction <- predict(xgboost_model, test)
+```
+
+#### Generate & write output dataset
+```{r,echo=TRUE,eval=FALSE}
+submission <- data.frame(id = testID, loss = exp(xgboost_prediction))
+
+write.csv(submission, 'xgboost_AR3.csv', row.names = FALSE)
+```
+
+#### References
+
+https://www.kaggle.com/nigelcarpenter/allstate-claims-severity/farons-xgb-starter-ported-to-r/code
+https://www.kaggle.com/notaapple/allstate-claims-severity/xgboost-one-hot-encoding-using-sparse-matrix-in-r
+
